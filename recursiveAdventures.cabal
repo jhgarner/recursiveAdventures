@@ -1,0 +1,65 @@
+cabal-version: 3.4
+name: recursiveAdventures
+version: 0.1.0.0
+-- synopsis:
+-- description:
+license: BSD-3-Clause
+license-file: LICENSE
+author: Jack Garner
+maintainer: jacksonhgarner@outlook.com
+-- copyright:
+build-type: Simple
+extra-doc-files: CHANGELOG.md
+
+-- extra-source-files:
+common warnings
+  ghc-options: -Wall
+
+executable recursiveAdventures
+  import: warnings
+  main-is: Main.hs
+  -- other-modules:
+  -- other-extensions:
+  hs-source-dirs: app
+  default-language:
+    GHC2024
+
+  build-depends:
+    base,
+    bytestring,
+    containers,
+    data-fix,
+    free,
+    generic-data,
+    megaparsec,
+    mtl,
+    parser-combinators,
+    recursion-schemes,
+    semigroupoids,
+    text,
+    transformers,
+    vector,
+
+  default-extensions:
+    ApplicativeDo
+    BlockArguments
+    DataKinds
+    DerivingStrategies
+    DerivingVia
+    DuplicateRecordFields
+    GADTs
+    LambdaCase
+    LexicalNegation
+    OverloadedLabels
+    OverloadedRecordDot
+    OverloadedStrings
+    PartialTypeSignatures
+    QualifiedDo
+    QuasiQuotes
+    RecordWildCards
+    RequiredTypeArguments
+    ScopedTypeVariables
+    TupleSections
+    TypeAbstractions
+    TypeFamilies
+    ViewPatterns
