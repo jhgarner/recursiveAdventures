@@ -1,49 +1,44 @@
-{-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedLists #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuantifiedConstraints #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
-{-# OPTIONS_GHC -Wno-partial-type-signatures #-}
-
 module Main (main) where
 
 import Control.Applicative
-import Control.Monad.Free
-import Data.Fix (Fix (..))
+import Data.Fix
 import Data.Functor
 import Data.Functor.Classes
 import Data.Functor.Compose
-import Data.Functor.Foldable
-import Data.Functor.Identity
 import Data.Text (Text)
 import Data.Void
-import GHC.Exts (IsList (..))
 import Generic.Data
 import Text.Megaparsec
 import Text.Megaparsec.Char.Lexer (decimal)
 
+-- Here's what all our work will enable:
 main :: IO ()
 main = do
-  -- You'd probably generate this expression parsing or something
-  -- let Right expr = parseOnly (exprParser <* endOfInput) "1 + (5 - 3) + 2 + 4"
-  -- print expr
   let input = "3 * 3 + 4 + (2 * 3 + 1) * 5 * 6 + 20"
-  -- let input = "3 * 3 + 4 + 8 * 5 * 6 + 20"
-  rawExpr <- either (fail . errorBundlePretty) pure $ parseExpr input
+  -- Parse the String into an Expr that can be run. Parsing either fails (in
+  -- which case we print a helpful error message) or it succeeds and we return
+  -- the value.
+  rawExpr <- either (fail . errorBundlePretty) return $ parseExpr input
+  -- The rawExpr is right associative and doesn't understand operator
+  -- precedence. We need to fix that before going farther.
   let expr = fixPrecedence $ fixAssociativity rawExpr
-  -- print $ printExpr rawExpr
-  print $ printExpr expr
+  -- Now we can interpret our language in various ways. These three lines will
+  -- print:
+  -- ((((3 * 3) + 4) + ((((2 * 3) + 1) * 5) * 6)) + 20)
+  -- 9
+  -- 243
+  putStrLn $ toString expr
   print $ countNumbers expr
-  print $ interpret expr
+  print $ calculate expr
+
+-- # Definitions
 
 -- | First we'll define the language we're trying to parse. It's just basic
 -- arithmetic, but the generic argument might look weird. Anywhere we'd normally
 -- use recursion, we use the generic argument. This has a bunch of benefits as
 -- we'll see later on. We'll also ask the compiler to derive a bunch of things
--- for us. Things like "Functor" and "Foldable" only make sense because our type
--- has a generic type.
+-- for us. "Functor", "Foldable", and "Traversable" allow us to iterate over the
+-- recursive parts of our data structure.
 data ExprF f = Operand (Operand f) | BinOp Operator f f
   deriving (Functor, Foldable, Traversable, Show, Generic1)
   deriving (Show1) via Generically1 ExprF
@@ -56,20 +51,25 @@ data Operand f = Number Int | Paren f
   deriving (Show1) via Generically1 Operand
 
 -- | Fix is a recursive datatype defined in a library. `Fix f` is equivalent to
--- `f (f (f (f ...)))` if you could write out an infinite number of fs.
+-- `f (f (f (f ...)))` if you could write out an infinite number of fs. That
+-- means Expr is ExprF applied to itself as many times as needed.
 type Expr = Fix ExprF
 
--- | Interpreting the language is extremely simple! We use the unhelfully named
--- `cata` function to tear our Expr down into a single number. We define how to
--- handle a single step assuming the child steps already ran, and `cata` takes
--- care of the recursion. Fun fact about Haskell: although it seems like you
--- should have to compute all the children before you can compute the parent,
--- this is lazy so children will only be computed when the parent uses their
--- value. For example, if we decided that all Paren expressions should just
--- evaluate to `4` instead of actually running the inner expressions, Haskell
--- would never compute them.
-interpret :: Expr -> Int
-interpret = cata \case
+-- #
+-- # Interpreting
+-- #
+
+-- | Interpreting the language is extremely simple! We use the `foldFix`
+-- function to tear our Expr down into a single number. We define how to handle
+-- a single step assuming the child steps already ran, and `foldFix` takes care
+-- of the recursion. Fun fact about Haskell: although it seems like you should
+-- have to compute all the children before you can compute the parent, this is
+-- lazy so children will only be computed when the parent needs their value. For
+-- example, if we decided that all Paren expressions should just evaluate to `4`
+-- instead of actually running the inner expressions, Haskell would never
+-- compute the values in parentheses.
+calculate :: Expr -> Int
+calculate = foldFix \case
   Operand (Number n) -> n
   Operand (Paren n) -> n
   BinOp Add a b -> a + b
@@ -78,22 +78,24 @@ interpret = cata \case
 -- | Another way of interpretting an Expression is to count how many numbers
 -- there are.
 countNumbers :: Expr -> Int
-countNumbers = cata \case
+countNumbers = foldFix \case
   Operand (Number _) -> 1
   -- We can flatten all the other cases into this one because ExprF implements
   -- Foldable.
   expr -> sum expr
 
 -- | And finally this way of interpretting an Expression just prints it with
--- explicit associativity.
-printExpr :: Expr -> String
-printExpr = cata \case
-  BinOp Add l r -> "(" ++ l ++ " + " ++ r ++ ")"
-  BinOp Mul l r -> "(" ++ l ++ " * " ++ r ++ ")"
+-- explicit parhentheses.
+toString :: Expr -> String
+toString = foldFix \case
+  BinOp op l r -> "(" ++ l ++ opToString op ++ r ++ ")"
   Operand (Number n) -> show n
   -- Ironically we don't need parentheses here because the child expression will
   -- already have them if they're needed.
   Operand (Paren n) -> n
+ where
+  opToString Add = " + "
+  opToString Mul = " * "
 
 -- # Parsing
 --
@@ -102,50 +104,44 @@ printExpr = cata \case
 
 -- | This is the parse tree we'll be working with. It's right associative
 -- because parsing is hard. To get something really nice and natually left
--- recursive I think I'd need to either switch parsing library or create an even
--- stranger looking type.
-data ExprFlat f = OpFlat (OperandP f) f
+-- recursive I think I'd need to either switch parsing libraries or create an
+-- even stranger looking type. Anyway, we can get around the associativity
+-- problems with post-processing.
+data ExprParse f = OpParse (OperandP f) f
   deriving (Functor, Foldable, Traversable)
 
 data OperandP f = ParenP f | NumberP
   deriving (Functor, Foldable, Traversable)
 
+-- | This is pretty much the same as ExprF but the type enforces that it's right
+-- associative. This'll be easier to work with when doing the initial parsing.
 data ExprRightF f = OperandR (Operand f) | BinOpR Operator (Operand f) f
   deriving (Functor, Foldable, Traversable, Show, Generic1)
   deriving (Show1) via Generically1 ExprRightF
 
 type ExprRight = Fix ExprRightF
 
--- | Many creates trees of es.
--- Compose takes two Functors and creates a new Functor combining the two.
--- Compose [] e a = [e a]
-type Many e = Compose [] e
+-- | This tells you how to grow all the parse trees. Anytime you see `()` in a
+-- value in the parser, you can read it as a seed. The tree will continue
+-- growing from that point.
+type ParserGrower e = [e ()]
 
--- | This tells you how to grow all the parse trees.
-type ParserGrower e = [e (Free (Many e) ())]
+-- | Defines how to grow all the parse trees for our Expr language. We place
+-- seeds in the rhs of the operation (because it's right associative) and in any
+-- parentheses.
+exprParseGrower :: ParserGrower ExprParse
+exprParseGrower = [lhs `OpParse` () | lhs <- [NumberP, ParenP ()]]
 
--- | Anytime you see a seed in a ParserGrower, it means that a new arbitrary
--- tree can grow from that point.
-seed :: Functor f => Free f ()
-seed = Pure ()
-
--- | Defines how to grow all the parse trees for our Expr language. We're not
--- actually using the full power of `seed` and `Free` here, but an earlier
--- version needed it so I've kept it around. Basically `Free` gives us more
--- control over what subtrees can expand into.
-allExprFlats :: ParserGrower ExprFlat
-allExprFlats = [lhs `OpFlat` seed | lhs <- [NumberP, ParenP seed]]
-
--- | This tells you how to prune away a parse tree
+-- | This tells you how to prune away a parse tree.
 type ParserPruner e = e (Parser ExprRight) -> Parser ExprRight
 
--- | Defines how to prune a parse tree into an Expression.
-flatParser :: ParserPruner ExprFlat
+-- | A pruner for Expressions.
+exprPruner :: ParserPruner ExprParse
 -- Anywhere you see `Fix` you can pretty much just ignore it. We just have to
 -- wrap our expressions in it to appease the type system.
-flatParser (OpFlat operandType rhsP) = fmap Fix do
+exprPruner (OpParse operandType rhsP) = fmap Fix do
   lhs <- parseOperand operandType
-  parseOpAndRhs lhs <|> pure (OperandR lhs)
+  parseOpAndRhs lhs <|> return (OperandR lhs)
  where
   parseOperand :: OperandP (Parser ExprRight) -> Parser (Operand ExprRight)
   parseOperand NumberP = Number <$> decimal
@@ -156,24 +152,23 @@ flatParser (OpFlat operandType rhsP) = fmap Fix do
     op <- " + " $> Add <|> " * " $> Mul
     BinOpR op lhs <$> rhsP
 
--- | Creates a parser that finds the correct parse tree
-pruneTrees :: ParserPruner e -> Many e (Parser ExprRight) -> Parser ExprRight
-pruneTrees parser (Compose xs) = asum $ fmap parser xs
-
 -- | Parses an Expression using everything defined so far
 parseExpr :: Text -> Either _ ExprRight
--- Yes cataFutu is an obtuse name, but it matches the "literature". Basically
--- cataFutu means that we'll build up our data structure using `futu` and tear
--- it down using `cata`. `cata` you've already seen. `futu` works with Free to
--- give us a lot of control over how we build our data structure.
-parseExpr = parse (cataFutu (pruneTrees flatParser) (const $ fromList allExprFlats) () <* eof) ""
+-- refold allows us to build up and tear down a structure. It combines `foldFix`
+-- with its opposite: `unfoldFix`. One really cool thing about refold is that it
+-- "fuses" the building and tearing together so that you never actually
+-- construct the whole intermediate data structure in memory.
+parseExpr = parse (refold pruneTrees growTrees () <* eof) ""
+ where
+  pruneTrees (Compose xs) = asum $ fmap exprPruner xs
+  growTrees = const $ Compose exprParseGrower
 
 -- | After parsing, operators are all considered to have the same precedence.
 -- Instead of trying to handle precedence in the parser, we post process it.
 -- Technically this is another way of interpreting the original Expr, so we use
--- cata.
+-- foldFix.
 fixPrecedence :: Expr -> Expr
-fixPrecedence = cata \case
+fixPrecedence = foldFix \case
   BinOp Mul (Fix (BinOp Add lhs innerRhs)) rhs -> Fix $ BinOp Add lhs (Fix $ BinOp Mul innerRhs rhs)
   expr -> Fix expr
 
@@ -183,42 +178,25 @@ type ExprBuilder = (Operand Expr -> Expr)
 -- | Given a right associative expression (the thing we got out of parsing)
 -- reassociate all the operators to the left.
 fixAssociativity :: ExprRight -> Expr
--- We're using cata in a way we haven't done before. When you tear down a
+-- We're using foldFix in a way we haven't done before. When you tear down a
 -- structure, you can return whatever type you want. Because any type is
--- allowed, functions are valid. Normally cata passes information bottom up, but
--- by returning a function we have a way of passing data top down as well.
-fixAssociativity expr = cata smuggleUp expr (Fix . Operand)
+-- allowed, functions are valid. Normally foldFix passes information bottom up,
+-- but by returning a function we have a way of passing data top down as well.
+fixAssociativity expr = foldFix smuggleUp expr (Fix . Operand)
  where
-  -- Here's where using cata with a function return type comes into play. Each
-  -- node is transformed into a function that can finish building an Expr by
-  -- applying its operand to the Builder that will be passed to it. The name is
-  -- a refernce to how you're taking nodes and passing them around to other
+  -- Here's where using foldFix with a function return type comes into play.
+  -- Each node is transformed into a function that can finish building an Expr
+  -- by applying its operand to the Builder that will be passed to it. The name
+  -- is a refernce to how you're taking nodes and passing them around to other
   -- parts of the tree.
   smuggleUp :: ExprRightF (ExprBuilder -> Expr) -> ExprBuilder -> Expr
   smuggleUp (BinOpR op operand rhsF) build =
-    rhsF $ \b -> Fix $ BinOp op (build $ fixOperand operand) (Fix $ Operand b)
+    rhsF \b -> Fix $ BinOp op (build $ fixOperand operand) (Fix $ Operand b)
   smuggleUp (OperandR operand) build = build $ fixOperand operand
 
-  fixOperand :: Operand ((Operand Expr -> Expr) -> f) -> Operand f
+  fixOperand :: Operand (ExprBuilder -> f) -> Operand f
   fixOperand (Paren inner) = Paren $ inner $ Fix . Operand
   fixOperand (Number n) = Number n
 
--- #
--- # Everything below this point would be defined in a generic library
--- #
-
+-- | An alias for a Parser of Text with no special error state
 type Parser = Parsec Void Text
-
-cataFutu :: Functor f => (f b -> b) -> (a -> f (Free f a)) -> a -> b
-cataFutu alg coalg = ghylo distCata distFutu (alg . fmap runIdentity) coalg
-
-instance IsList (Compose [] f a) where
-  type Item (Compose [] f a) = f a
-  fromList = Compose
-  toList (Compose ls) = ls
-
-instance IsList (f (Free f a)) => IsList (Free f a) where
-  type Item (Free f a) = Item (f (Free f a))
-  fromList ls = Free $ fromList ls
-  toList (Free ls) = toList ls
-  toList (Pure _) = []
